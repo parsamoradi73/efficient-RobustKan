@@ -5,6 +5,8 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from dataclasses import dataclass
 from typing import List
+import random
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -20,6 +22,10 @@ class Config:
     hidden_size: int 
     activation: str 
     kan_reg_coeff: float 
+    kan_smoothness_coeff: float
+    kan_activation_coeff: float  # Weight for activation regularization
+    kan_entropy_coeff: float  # Weight for entropy regularization
+    spline_grid_size: int  # Number of grid points for B-spline basis functions
     
     # Training configuration
     batch_size: int 
@@ -27,6 +33,7 @@ class Config:
     learning_rate: float 
     weight_decay: float
     lr_milestones: List[int]
+    random_seed: int
     
     # System configuration
     num_workers: int
@@ -76,7 +83,7 @@ class MNISTModule(L.LightningModule):
         # Model selection
         layer_sizes = [28 * 28, config.hidden_size, 10]
         if config.model_type.lower() == 'kan':
-            self.model = KAN(layer_sizes)
+            self.model = KAN(layer_sizes, grid_size=config.spline_grid_size, random_seed=config.random_seed)
         elif config.model_type.lower() == 'mlp':
             self.model = MLP(layer_sizes, activation=config.activation_fn)
         else:
@@ -92,6 +99,7 @@ class MNISTModule(L.LightningModule):
             self.parameters(),
             lr=self.config.learning_rate,
             weight_decay=0 if self.model_type.lower() == 'kan' else self.config.weight_decay
+            # weight_decay = self.config.weight_decay
         )
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer,
@@ -111,7 +119,12 @@ class MNISTModule(L.LightningModule):
         output = self(images)
         loss = self.criterion(output, labels)
         if self.model_type == 'kan':
-            reg_loss = self.config.kan_reg_coeff * self.model.regularization_loss(1, 0)
+            
+            reg_loss = self.config.kan_reg_coeff * self.model.regularization_loss(
+                regularize_activation=self.config.kan_activation_coeff,
+                regularize_entropy=self.config.kan_entropy_coeff,
+                regularize_smoothness=self.config.kan_smoothness_coeff
+            )
             loss += reg_loss
             # Log regularization loss separately
             self.log('train_reg_loss', reg_loss, prog_bar=True)
@@ -134,6 +147,14 @@ class MNISTModule(L.LightningModule):
         return loss
 
 def main(config: Config):
+    # Set random seeds for reproducibility
+    random.seed(config.random_seed)
+    np.random.seed(config.random_seed)
+    torch.manual_seed(config.random_seed)
+    torch.cuda.manual_seed_all(config.random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     # Data
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -152,27 +173,27 @@ def main(config: Config):
         batch_size=config.batch_size, 
         shuffle=True, 
         num_workers=config.num_workers, 
-        persistent_workers=True
+        persistent_workers=True,
     )
     val_loader = DataLoader(
         valset, 
         batch_size=config.batch_size, 
         shuffle=False, 
         num_workers=config.num_workers, 
-        persistent_workers=True
+        persistent_workers=True,
     )
     
     # Model
     model = MNISTModule(config)
     
     # Logger
-    logger = TensorBoardLogger("lightning_logs", name=f"{config.model_type}_{config.exp_name}", version=None)
+    logger = TensorBoardLogger("lightning_logs", name=f"logs", version=f"{config.model_type}_{config.exp_name}")
     
     # Callbacks
     callbacks = [
         ModelCheckpoint(
             monitor='val_loss',
-            dirpath='checkpoints',
+            dirpath=f'checkpoints/{config.model_type}_{config.exp_name}',
             filename=f'mnist-{config.model_type}-{config.activation}-{{epoch:02d}}-{{val_loss:.2f}}',
             save_top_k=3,
             mode='min'
@@ -209,16 +230,36 @@ if __name__ == "__main__":
                       help='List of epochs at which to decay the learning rate')
     parser.add_argument('--learning-rate', type=float, default=1e-3,
                       help='Initial learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-3,
-                      help='Weight decay (L2 regularization)')
-    parser.add_argument('--exp', type=str, default='test',
-                      help='Experiment name')
     parser.add_argument('--hidden-size', type=int, default=100,
                       help='Size of hidden layer')
     parser.add_argument('--num-workers', type=int, default=7,
                       help='Number of data loading workers')
-    parser.add_argument('--kan-reg-coeff', type=float, default=0,
+
+#############################################################################
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                      help='Weight decay (L2 regularization)')
+    
+    parser.add_argument('--exp', type=str, default='test',
+                      help='Experiment name')
+
+                      
+    parser.add_argument('--kan-reg-coeff', type=float, default=1e-3,
                       help='Coefficient for KAN regularization loss')
+    
+
+    parser.add_argument('--kan-smoothness-coeff', type=float, default=0.0,
+                      help='Coefficient for KAN smoothness regularization')
+    parser.add_argument('--kan-activation-coeff', type=float, default=1.0,
+                      help='Weight for activation regularization in KAN')
+    parser.add_argument('--kan-entropy-coeff', type=float, default=0.0,
+                      help='Weight for entropy regularization in KAN')
+    
+
+    parser.add_argument('--random-seed', type=int, default=42,
+                      help='Random seed for reproducibility')
+    
+    parser.add_argument('--spline-grid-size', type=int, default=5,
+                      help='Number of grid points for B-spline basis functions in KAN')
     
     args = parser.parse_args()
     
@@ -233,7 +274,12 @@ if __name__ == "__main__":
         lr_milestones=args.lr_milestones,
         num_workers=args.num_workers,
         exp_name=args.exp,
-        kan_reg_coeff=args.kan_reg_coeff
+        kan_reg_coeff=args.kan_reg_coeff,
+        kan_smoothness_coeff=args.kan_smoothness_coeff,
+        kan_activation_coeff=args.kan_activation_coeff,
+        kan_entropy_coeff=args.kan_entropy_coeff,
+        spline_grid_size=args.spline_grid_size,
+        random_seed=args.random_seed
     )
     
     main(config) 
