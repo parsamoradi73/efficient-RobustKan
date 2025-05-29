@@ -1,0 +1,20 @@
+# Core ML/DL
+torch==2.7.0
+torchvision==0.22.0
+lightning>=2.0.0
+numpy==2.2.6
+scipy>=1.11.0
+
+# Progress and Utilities
+tqdm==4.67.1
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# Experiment Tracking and Logging
+tensorboard>=2.13.0
+
+# Development Tools
+black>=23.0.0  # Code formatting
+isort>=5.12.0  # Import sorting
+flake8>=6.0.0  # Code linting
+pytest>=7.3.0  # Testing 

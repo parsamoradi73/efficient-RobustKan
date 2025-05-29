@@ -75,24 +75,32 @@ class KANLinear(torch.nn.Module):
                 # torch.nn.init.constant_(self.spline_scaler, self.scale_spline)
                 torch.nn.init.kaiming_uniform_(self.spline_scaler, a=math.sqrt(5) * self.scale_spline)
 
-    def b_splines(self, x: torch.Tensor):
+    def b_splines(self, x: torch.Tensor, m: int = 0):
         """
-        Compute the B-spline bases for the given input tensor.
+        Compute the m-th derivative of B-spline bases for the given input tensor.
+        When m = 0, returns the B-spline bases themselves.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, in_features).
+            m (int): Order of derivative to compute. Must be <= spline_order.
 
         Returns:
-            torch.Tensor: B-spline bases tensor of shape (batch_size, in_features, grid_size + spline_order).
+            torch.Tensor: B-spline bases or their derivatives tensor of shape 
+            (batch_size, in_features, grid_size + spline_order).
         """
         assert x.dim() == 2 and x.size(1) == self.in_features
+        assert m <= self.spline_order, f"Derivative order {m} must be <= spline_order {self.spline_order}"
 
         grid: torch.Tensor = (
             self.grid
         )  # (in_features, grid_size + 2 * spline_order + 1)
         x = x.unsqueeze(-1)
+        
+        # Initialize with indicator functions
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
-        for k in range(1, self.spline_order + 1):
+        
+        # Compute regular B-splines up to order needed
+        for k in range(1, self.spline_order + 1 - m):
             bases = (
                 (x - grid[:, : -(k + 1)])
                 / (grid[:, k:-1] - grid[:, : -(k + 1)])
@@ -102,6 +110,17 @@ class KANLinear(torch.nn.Module):
                 / (grid[:, k + 1 :] - grid[:, 1:(-k)])
                 * bases[:, :, 1:]
             )
+        
+        # If derivatives are requested, apply derivative formula
+        if m > 0:
+            for _ in range(m):
+                k = bases.size(-1)  # Current support width
+                diff_quotient = k / (
+                    grid[:, k:] - grid[:, :-k]
+                )
+                bases = diff_quotient.unsqueeze(0) * (
+                    bases[:, :, 1:] - bases[:, :, :-1]
+                )
 
         assert bases.size() == (
             x.size(0),
