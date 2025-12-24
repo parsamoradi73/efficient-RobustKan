@@ -11,84 +11,78 @@ import numpy as np
 import os
 import yaml
 
+
+def pgd_attack(model, x, y, device, epsilon, steps=10):
+    x = x.clone().detach().to(device)
+    y = y.clone().detach().to(device)
+    x_adv = x.clone().detach()
+
+    step_size = epsilon / 5.0
+
+    for _ in range(steps):
+        x_adv.requires_grad = True
+        outputs = model(x_adv)
+        loss = F.cross_entropy(outputs, y)
+        model.zero_grad()
+        if x_adv.grad is not None: 
+            x_adv.grad.zero_()
+        loss.backward()
+        grad_sign = x_adv.grad.sign()
+        x_adv = x_adv + step_size * grad_sign
+        x_adv = torch.max(torch.min(x_adv, x + epsilon), x - epsilon)
+        # x_adv = torch.clamp(x_adv, -1, 1)
+        x_adv = x_adv.detach()
+
+    return x_adv
+
 def fgsm_attack(model, x, y, epsilon, device):
-    """
-    Perform FGSM attack on the model.
-    
-    Args:
-        model: The model to attack
-        x: Input tensor
-        y: Target tensor
-        epsilon: Attack strength
-        device: Device to run the attack on
-    
-    Returns:
-        Perturbed input tensor
-    """
     x = x.clone().detach().to(device)
     y = y.clone().detach().to(device)
     
     x.requires_grad = True
     
-    # Forward pass
     output = model(x)
     loss = F.cross_entropy(output, y)
     
-    # Backward pass
     loss.backward()
     
-    # Create perturbation
     perturbation = epsilon * torch.sign(x.grad.data)
-    
-    # Create adversarial example
     x_adv = x + perturbation
-    # Clamp to valid image range [-1, 1] (assuming normalized data)
-    x_adv = torch.clamp(x_adv, -1, 1)
+    # x_adv = torch.clamp(x_adv, -1, 1)
+    x_adv = torch.max(torch.min(x_adv, x + epsilon), x - epsilon)
     
     return x_adv
 
-def evaluate_robustness(model, test_loader, epsilons, device):
-    """
-    Evaluate model robustness against FGSM attack with different epsilon values.
-    
-    Args:
-        model: The model to evaluate
-        test_loader: DataLoader for test data
-        epsilons: List of epsilon values to test
-        device: Device to run evaluation on
-    
-    Returns:
-        Dictionary containing accuracies for each epsilon
-    """
+def evaluate_robustness(model, test_loader, epsilons, device, attack, steps, step_size):
     model.eval()
     results = {eps: [] for eps in epsilons}
     
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
         
-        # Test clean accuracy
-        with torch.no_grad():
-            output = model(x)
-            pred = output.argmax(dim=1)
-            clean_correct = (pred == y).float().mean().item()
-            results[0.0].append(clean_correct)
-        
-        # Test adversarial accuracy
-        for eps in epsilons:
-            if eps == 0.0:
-                continue
+        if attack.lower() == 'fgsm':
+            for eps in epsilons:
+                x_adv = fgsm_attack(model, x, y, eps, device)
                 
-            x_adv = fgsm_attack(model, x, y, eps, device)
-            
-            with torch.no_grad():
-                output = model(x_adv)
-                pred = output.argmax(dim=1)
-                adv_correct = (pred == y).float().mean().item()
-                results[eps].append(adv_correct)
+                
+                with torch.no_grad():
+                    output = model(x_adv)
+                    pred = output.argmax(dim=1)
+                    adv_correct = (pred == y).float().mean().item()
+                    results[eps].append(adv_correct)
     
-    # Calculate mean accuracies
-    mean_results = {eps: np.mean(accs) for eps, accs in results.items()}
-    return mean_results
+            mean_results = {eps: np.mean(accs) for eps, accs in results.items()}
+            return mean_results
+        elif attack.lower() == 'pgd':
+            for eps in epsilons:
+                x_adv = pgd_attack(model, x, y, device, eps, steps)
+                with torch.no_grad():
+                    output = model(x_adv)
+                    pred = output.argmax(dim=1)
+                    adv_correct = (pred == y).float().mean().item()
+                    results[eps].append(adv_correct)
+            mean_results = {eps: np.mean(accs) for eps, accs in results.items()}
+            return mean_results
 
 def plot_results(results, title="Model Robustness Against FGSM Attack"):
     """
@@ -112,17 +106,23 @@ def plot_results(results, title="Model Robustness Against FGSM Attack"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', type=str, required=True,
-                      help='Path to the model checkpoint')
-    parser.add_argument('--batch-size', type=int, default=256,
+    parser.add_argument('--checkpoint', type=str, default='last',
                       help='Batch size for testing')
-    parser.add_argument('--num-workers', type=int, default=7,
+    parser.add_argument('--batch-size', type=int, default=1024,
+                      help='Batch size for testing')
+    parser.add_argument('--num-workers', type=int, default=os.cpu_count(),
                       help='Number of data loading workers')
     parser.add_argument('--epsilons', type=float, nargs='+',
-                      default=[0.0, 2.0/255, 4.0/255, 8.0/255, 16.0/255, 64.0/255],
+                      default=[0, 2.0/255, 4.0/255, 8.0/255, 16.0/255, 32.0/255, 64.0/255, 96.0/255],
                       help='Epsilon values for FGSM attack')
     parser.add_argument('--exp', type=str, default='test',
                       help='Experiment name')
+    parser.add_argument('--steps', type=int, default=40,
+                      help='Number of steps for PGD attack')
+    parser.add_argument('--step-size', type=float, default=0.01,
+                      help='Step size for PGD attack')
+    parser.add_argument('--attack', type=str, default='fgsm', choices=['fgsm', 'pgd'],
+                      help='Attack type')
     args = parser.parse_args()
 
     # Load the checkpoint
@@ -130,11 +130,11 @@ def main():
     base_dir = f"lightning_logs/logs/{args.exp}"
     print(os.path.join(base_dir, 'hparams.yaml'))
     with open(os.path.join(base_dir, 'hparams.yaml'), 'r') as file:
-        cfg = yaml.safe_load(file)['config']
+        cfg = yaml.safe_load(file)
     
     config = Config(
         model_type=cfg['model_type'],
-        hidden_size=cfg['hidden_size'],
+        hidden_sizes=cfg['hidden_sizes'],
         activation=cfg['activation'],
         batch_size=cfg['batch_size'],
         n_epochs=cfg['n_epochs'],
@@ -153,7 +153,10 @@ def main():
 
     # Create model and load state
     # model = MNISTModule(config)
-    model = MNISTModule.load_from_checkpoint(args.checkpoint, config=config)
+    if args.checkpoint == 'last':
+        model = MNISTModule.load_from_checkpoint(f"checkpoints/{args.exp}/last.ckpt", config=config)
+    else:
+        model = MNISTModule.load_from_checkpoint(args.checkpoint, config=config)
     
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -163,7 +166,7 @@ def main():
     # Prepare data
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
+        transforms.Normalize((0.130,), (0.308,))
     ])
     
     test_dataset = torchvision.datasets.MNIST(
@@ -179,7 +182,7 @@ def main():
 
     # Evaluate robustness
     print("Evaluating model robustness...")
-    results = evaluate_robustness(model, test_loader, args.epsilons, device)
+    results = evaluate_robustness(model, test_loader, args.epsilons, device, args.attack, args.steps, args.step_size)
     
     # Print results
     print("\nResults:")
