@@ -96,7 +96,7 @@ class MNISTModule(L.LightningModule):
         optimizer = optim.Adam(
             self.parameters(),
             lr=self.config.learning_rate,
-            weight_decay=0 if self.model_type.lower() == 'kan' else self.config.weight_decay
+            weight_decay=self.config.weight_decay
         )
         scheduler = optim.lr_scheduler.MultiStepLR(
             optimizer,
