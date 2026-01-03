@@ -304,7 +304,7 @@ if __name__ == "__main__":
         )
     else:
         exp_name = (
-            f"{args.model}_lr_{args.learning_rate}_wd_{args.weight_decay}_seed_{args.random_seed}{args.suffix}"
+            f"{args.model}_hid_{','.join(map(str, args.hidden_sizes))}_lr_{args.learning_rate}_wd_{args.weight_decay}_seed_{args.random_seed}{args.suffix}"
         )
 
     config = Config(

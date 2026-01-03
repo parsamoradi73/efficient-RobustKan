@@ -55,7 +55,7 @@ def fgsm_attack(model, x, y, epsilon, device):
 
 def evaluate_robustness(model, test_loader, epsilons, device, attack, steps, step_size):
     model.eval()
-    results = {eps: [] for eps in epsilons}
+    results = {eps: 0 for eps in epsilons}
     
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
@@ -63,26 +63,23 @@ def evaluate_robustness(model, test_loader, epsilons, device, attack, steps, ste
         if attack.lower() == 'fgsm':
             for eps in epsilons:
                 x_adv = fgsm_attack(model, x, y, eps, device)
-                
-                
                 with torch.no_grad():
                     output = model(x_adv)
                     pred = output.argmax(dim=1)
-                    adv_correct = (pred == y).float().mean().item()
-                    results[eps].append(adv_correct)
+                    adv_correct = (pred == y).float().sum().item()
+                    results[eps] += adv_correct
     
-            mean_results = {eps: np.mean(accs) for eps, accs in results.items()}
-            return mean_results
         elif attack.lower() == 'pgd':
             for eps in epsilons:
                 x_adv = pgd_attack(model, x, y, device, eps, steps)
                 with torch.no_grad():
                     output = model(x_adv)
                     pred = output.argmax(dim=1)
-                    adv_correct = (pred == y).float().mean().item()
-                    results[eps].append(adv_correct)
-            mean_results = {eps: np.mean(accs) for eps, accs in results.items()}
-            return mean_results
+                    adv_correct = (pred == y).float().sum().item()
+                    results[eps] += adv_correct
+    mean_results = {eps: accs / len(test_loader.dataset) for eps, accs in results.items()}
+
+    return mean_results
 
 def plot_results(results, title="Model Robustness Against FGSM Attack"):
     """
@@ -177,13 +174,14 @@ def main():
         test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        persistent_workers=True,
+        drop_last=False,
     )
 
     # Evaluate robustness
     print("Evaluating model robustness...")
     results = evaluate_robustness(model, test_loader, args.epsilons, device, args.attack, args.steps, args.step_size)
-    
     # Print results
     print("\nResults:")
     print("-" * 40)
@@ -191,14 +189,6 @@ def main():
     print("-" * 40)
     for eps, acc in results.items():
         print(f"{eps:.3f}    |  {acc:.4f}")
-    
-    # # Plot results
-    # plot_results(results, f"Model Robustness Against FGSM Attack ({config.model_type})")
-    # print("\nPlot saved as 'robustness_plot.png'")
-
-    # Save numerical results
-    # np.save('robustness_results.npy', results)
-    # print("Numerical results saved as 'robustness_results.npy'")
 
 if __name__ == "__main__":
     main() 
